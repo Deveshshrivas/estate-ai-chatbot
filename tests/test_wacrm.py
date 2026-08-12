@@ -1,14 +1,58 @@
 import hashlib
 import hmac
+import json
 import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app import agent, wacrm
+from app import main
+from starlette.requests import Request
+
+
+def request_with_json(path: str, payload: dict, headers: list[tuple[bytes, bytes]] | None = None):
+    body = json.dumps(payload).encode()
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request({
+        "type": "http", "method": "POST", "path": path,
+        "headers": headers or [], "query_string": b"",
+        "server": ("test", 80), "client": ("test", 1), "scheme": "https",
+    }, receive)
 
 
 class WacrmTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wacrm_webhook_awaits_inbound_processing(self):
+        process = AsyncMock()
+        request = request_with_json(
+            "/wacrm-webhook",
+            {"event": "message.received", "data": {"whatsapp_message_id": "wamid-1"}},
+        )
+        with patch.object(wacrm, "verify_signature", return_value=True), patch.object(
+            wacrm, "process_inbound", process
+        ):
+            response = await main.receive_wacrm_webhook(request)
+        process.assert_awaited_once()
+        self.assertEqual(response["status"], "accepted")
+
+    async def test_meta_webhook_awaits_message_processing(self):
+        process = AsyncMock()
+        request = request_with_json("/webhooks/whatsapp", {"entry": []})
+        with patch.object(main, "verify_signature", return_value=True), patch.object(
+            main, "extract_messages", return_value=[{"id": "wamid-2"}]
+        ), patch.object(main, "process_message", process):
+            response = await main.receive_whatsapp_webhook(request)
+        process.assert_awaited_once_with({"id": "wamid-2"})
+        self.assertEqual(response["status"], "accepted")
+
     def test_signature_verification_and_replay_guard(self):
         body = b'{"event":"message.received"}'
         timestamp = str(int(time.time()))

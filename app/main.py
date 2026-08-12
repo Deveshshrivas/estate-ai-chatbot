@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-from fastapi import BackgroundTasks, FastAPI, WebSocket, WebSocketDisconnect, Request, Response, HTTPException, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -404,7 +404,7 @@ async def property_image(url: str = Query(min_length=20, max_length=1000)):
 
 
 @app.post("/wacrm-webhook")
-async def receive_wacrm_webhook(request: Request, background_tasks: BackgroundTasks):
+async def receive_wacrm_webhook(request: Request):
     body = await request.body()
     if not wacrm.verify_signature(body, request.headers.get("X-Wacrm-Signature")):
         raise HTTPException(status_code=401, detail="Invalid WACRM webhook signature")
@@ -412,9 +412,9 @@ async def receive_wacrm_webhook(request: Request, background_tasks: BackgroundTa
     event = payload.get("event")
     data = payload.get("data") or {}
     if event == "message.received":
-        background_tasks.add_task(wacrm.process_inbound, data)
+        await wacrm.process_inbound(data)
     elif event == "message.sent" and data.get("content_type") == "template":
-        background_tasks.add_task(wacrm.record_template_send, data)
+        await wacrm.record_template_send(data)
     return {"status": "accepted"}
 
 
@@ -442,9 +442,11 @@ async def receive_whatsapp_webhook(request: Request):
     if not verify_signature(body, request.headers.get("X-Hub-Signature-256")):
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
     payload = json.loads(body)
-    # Meta expects an immediate 200; processing continues outside the response path.
-    for message in extract_messages(payload):
-        asyncio.create_task(process_message(message))
+    # Serverless runtimes terminate fire-and-forget tasks after the response.
+    # Process inside the invocation; webhook-event idempotency makes retries safe.
+    messages = extract_messages(payload)
+    if messages:
+        await asyncio.gather(*(process_message(message) for message in messages))
     return {"status": "accepted"}
 
 
