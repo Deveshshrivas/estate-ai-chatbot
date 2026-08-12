@@ -9,7 +9,7 @@ from .database import db
 async def save_customer_name(
     phone: str, name: str, source: str = "whatsapp", database: Any = None,
 ) -> None:
-    store = database or db
+    store = database if database is not None else db
     now = datetime.now(timezone.utc)
     await store.customer_profiles.update_one(
         {"phone": phone},
@@ -33,7 +33,7 @@ async def save_customer_name(
 
 
 async def request_customer_name(phone: str, database: Any = None) -> None:
-    store = database or db
+    store = database if database is not None else db
     now = datetime.now(timezone.utc)
     await store.customer_profiles.update_one(
         {"phone": phone},
@@ -50,7 +50,7 @@ async def request_customer_name(phone: str, database: Any = None) -> None:
 
 
 async def get_customer_profile(phone: str, database: Any = None) -> dict[str, Any]:
-    store = database or db
+    store = database if database is not None else db
     return await store.customer_profiles.find_one({"phone": phone}) or {}
 
 
@@ -63,7 +63,7 @@ async def remember_booking(
 ) -> None:
     """Append a durable booking event instead of overwriting previous bookings."""
     now = datetime.now(timezone.utc)
-    store = database or db
+    store = database if database is not None else db
     await store.booking_history.insert_one({
         "phone": phone,
         "customer_name": customer_name,
@@ -79,7 +79,7 @@ async def remember_booking(
 
 
 async def latest_booking(phone: str, database: Any = None) -> dict[str, Any]:
-    store = database or db
+    store = database if database is not None else db
     memory = await store.booking_history.find_one(
         {"phone": phone}, sort=[("created_at", -1)]
     )
@@ -95,7 +95,7 @@ async def latest_booking(phone: str, database: Any = None) -> dict[str, Any]:
 async def remember_cancellation(
     phone: str, reason: str, database: Any = None,
 ) -> None:
-    store = database or db
+    store = database if database is not None else db
     now = datetime.now(timezone.utc)
     latest = await store.booking_history.find_one(
         {"phone": phone, "status": {"$in": ["requested", "scheduled", "confirmed"]}},
