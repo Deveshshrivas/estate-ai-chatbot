@@ -6,6 +6,32 @@ from app import whatsapp
 
 
 class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_saved_booking_cancellation_runs_before_pending_lead_flow(self):
+        message = {
+            "id": "wamid-cancel-1", "from": "919999999999", "type": "text",
+            "text": {"body": "Please cancel my booked site visit"},
+            "_customer_name": "Devesh",
+        }
+        database = SimpleNamespace(
+            webhook_events=SimpleNamespace(insert_one=AsyncMock())
+        )
+        with patch.object(
+            whatsapp, "db", database
+        ), patch.object(
+            whatsapp, "mark_read_and_typing", AsyncMock()
+        ), patch.object(
+            whatsapp, "save_message", AsyncMock()
+        ), patch.object(
+            whatsapp, "_handle_customer_identity", AsyncMock(return_value=False)
+        ), patch.object(
+            whatsapp, "_cancel_saved_booking", AsyncMock(return_value=True)
+        ) as cancel, patch.object(
+            whatsapp, "_handle_lead_details", AsyncMock(return_value=True)
+        ) as pending:
+            await whatsapp.process_message(message)
+        cancel.assert_awaited_once()
+        pending.assert_not_awaited()
+
     async def test_first_greeting_asks_for_name_once(self):
         send = AsyncMock()
         with patch.object(
@@ -101,9 +127,14 @@ class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
         )
         campaigns = SimpleNamespace(update_many=AsyncMock())
         visits = SimpleNamespace(update_many=AsyncMock())
+        history = SimpleNamespace(
+            find_one=AsyncMock(return_value={"_id": "memory-1", "status": "requested"}),
+            update_one=AsyncMock(),
+        )
         send = AsyncMock()
         database = SimpleNamespace(
-            leads=leads, outbound_campaigns=campaigns, site_visits=visits
+            leads=leads, outbound_campaigns=campaigns, site_visits=visits,
+            booking_history=history,
         )
         with patch.object(whatsapp, "db", database), patch.object(
             whatsapp, "classify_booking_cancellation", AsyncMock(return_value=True)
@@ -117,6 +148,9 @@ class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
         saved = leads.update_one.await_args.args[1]["$set"]
         self.assertEqual(saved["status"], "cancelled")
         self.assertEqual(saved["appointment_status"], "cancelled")
+        self.assertEqual(
+            history.update_one.await_args.args[1]["$set"]["status"], "cancelled"
+        )
         send.assert_awaited_once()
 
     async def test_callback_date_without_time_is_saved_then_time_is_requested(self):

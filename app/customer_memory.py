@@ -58,6 +58,7 @@ async def remember_booking(
     *, phone: str, booking_type: str, status: str,
     property_title: str | None = None, scheduled_at: Any = None,
     contact_preference: str | None = None, source_id: str | None = None,
+    customer_name: str | None = None,
     database: Any = None,
 ) -> None:
     """Append a durable booking event instead of overwriting previous bookings."""
@@ -65,6 +66,7 @@ async def remember_booking(
     store = database or db
     await store.booking_history.insert_one({
         "phone": phone,
+        "customer_name": customer_name,
         "booking_type": booking_type,
         "status": status,
         "property_title": property_title,

@@ -261,9 +261,9 @@ async def process_message(message: dict[str, Any]) -> None:
         await save_message(f"wa:{sender}", "user", text, channel="whatsapp")
         if await _handle_customer_identity(sender, text):
             return
-        if await _handle_lead_details(sender, message.get("_customer_name", ""), text, ai_replies=True):
-            return
         if await _cancel_saved_booking(sender, text, ai_replies=True):
+            return
+        if await _handle_lead_details(sender, message.get("_customer_name", ""), text, ai_replies=True):
             return
         result = await graph.ainvoke({
             "session_id": f"wa:{sender}",
@@ -577,6 +577,7 @@ async def _handle_lead_details(
                 phone=phone, booking_type="site_visit", status="scheduled",
                 property_title=pending.get("selected_property") or "Selected property",
                 scheduled_at=slot, source_id=str(visit.get("id") or ""),
+                customer_name=name or pending.get("whatsapp_name") or phone,
                 database=db,
             )
         await stop_sales_followups(phone)
@@ -631,6 +632,7 @@ async def _handle_lead_details(
                     phone=phone, booking_type="consultation", status="requested",
                     property_title=pending.get("selected_property"),
                     scheduled_at=schedule, contact_preference=preference,
+                    customer_name=pending.get("customer_name") or name or phone,
                     database=db,
                 )
             await db.pending_leads.delete_one({"_id": pending["_id"]})
@@ -674,6 +676,7 @@ async def _handle_lead_details(
                 property_title=pending.get("selected_property"),
                 scheduled_at=pending.get("preferred_schedule"),
                 contact_preference=pending.get("contact_preference") or "phone_call",
+                customer_name=name or pending.get("whatsapp_name") or phone,
                 database=db,
             )
         await stop_sales_followups(phone)

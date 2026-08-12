@@ -617,6 +617,13 @@ async def _process_current_turn(
     await save_message(session_id, "user", text, channel="whatsapp")
     if await _handle_customer_identity(phone, text, send=send_current_text):
         return
+    if await _cancel_saved_booking(
+        phone, text, send=send_current_text, ai_replies=True,
+    ):
+        await _sync_cancelled_lead(
+            phone, str(data.get("contact_id") or ""), data.get("conversation_id")
+        )
+        return
     if _is_goodbye(text):
         await db.pending_leads.delete_many({"session_id": f"wa:{phone}"})
         if await _is_current_turn(phone, message_id):
@@ -686,13 +693,6 @@ async def _process_current_turn(
         ai_replies=True,
     ):
         await _sync_new_lead(phone, str(data.get("contact_id") or ""), data.get("conversation_id"))
-        return
-    if await _cancel_saved_booking(
-        phone, text, send=send_current_text, ai_replies=True,
-    ):
-        await _sync_cancelled_lead(
-            phone, str(data.get("contact_id") or ""), data.get("conversation_id")
-        )
         return
     result = await graph.ainvoke({"session_id": session_id, "message": text, "image": None})
     # A newer customer message arrived while the model was thinking. Never send
