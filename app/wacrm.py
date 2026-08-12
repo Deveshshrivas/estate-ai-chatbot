@@ -13,10 +13,7 @@ import httpx
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from .agent import (
-    classify_customer_control, generate_advisor_reply, generate_property_captions,
-    generate_sales_followup, graph,
-)
+from .agent import generate_sales_followup, graph
 from .config import get_settings
 from .database import db, save_message
 from .whatsapp import (
@@ -569,19 +566,10 @@ async def _process_current_turn(
         {"$set": {"status": "customer_replied", "replied_at": now, "updated_at": now}},
     )
     campaign = await db.outbound_campaigns.find_one({"phone": phone, "status": "active"})
-    control = {"action": "continue"}
-    if _might_be_conversation_control(text):
-        control = await classify_customer_control(
-            text,
-            {
-                "has_active_campaign": bool(campaign),
-                "contact_name": contact.get("name") or "",
-            },
-        )
-    should_opt_out = control.get("action") == "global_opt_out"
-    # Fail safe only for unmistakable opt-out language when the provider is down.
-    if control.get("action") == "unknown":
-        should_opt_out = _is_property_opt_out(text)
+    should_opt_out = (
+        _is_property_opt_out(text)
+        if _might_be_conversation_control(text) else False
+    )
     if should_opt_out:
         await db.outbound_campaigns.update_many(
             {"phone": phone, "status": "active"},
@@ -597,11 +585,7 @@ async def _process_current_turn(
                 "last_customer_message": text, "updated_at": now,
             }},
         )
-        answer = await generate_advisor_reply(
-            "Understood. We have stopped all sales follow-ups and will not message you again. Thank you.",
-            text,
-            {"campaign_status": "opted_out"},
-        )
+        answer = "Understood. We have stopped all sales follow-ups and will not message you again. Thank you."
         await send_current_text(phone, answer)
         return
     if campaign:
@@ -628,11 +612,7 @@ async def _process_current_turn(
     if _is_goodbye(text):
         await db.pending_leads.delete_many({"session_id": f"wa:{phone}"})
         if await _is_current_turn(phone, message_id):
-            answer = await generate_advisor_reply(
-                "Thanks for chatting with us. You can message again whenever you need property help.",
-                text,
-                {"contact_name": contact.get("name") or ""},
-            )
+            answer = "Thanks for chatting with us. You can message again whenever you need property help."
             await send_text(phone, answer)
             await save_message(f"wa:{phone}", "assistant", answer, channel="whatsapp")
         return
@@ -641,11 +621,6 @@ async def _process_current_turn(
         answer = (
             "We currently have properties in " + ", ".join(cities) + ". Which city interests you?"
             if cities else "Our live inventory is being updated. Which city interests you?"
-        )
-        answer = await generate_advisor_reply(
-            answer,
-            text,
-            {"available_cities": cities},
         )
         if await _is_current_turn(phone, message_id):
             await send_text(phone, answer)
@@ -676,11 +651,7 @@ async def _process_current_turn(
             }},
             upsert=True,
         )
-        answer = await generate_advisor_reply(
-            "Yes, I can arrange a callback with a property advisor. What future day and time works for you?",
-            text,
-            {"contact_name": contact.get("name") or ""},
-        )
+        answer = "Yes, I can arrange a callback with a property advisor. What future day and time works for you?"
         if await _is_current_turn(phone, message_id):
             await send_text(phone, answer)
             await save_message(f"wa:{phone}", "assistant", answer, channel="whatsapp")
@@ -739,7 +710,7 @@ async def _process_current_turn(
             "price": _format_price(listing),
             "fallback": fallback,
         })
-    captions = await generate_property_captions(caption_cards, text)
+    captions = [card["fallback"] for card in caption_cards]
     for listing, caption in zip(listings_to_send, captions):
         images = listing.get("images") or []
         if not images:
@@ -749,10 +720,9 @@ async def _process_current_turn(
             if not await _is_current_turn(phone, message_id):
                 return
             await send_image(phone, delivery_image_url(image_url), caption)
-    answer = await generate_advisor_reply(
-        str(result.get("answer") or "Ask for the customer's preferred city, budget and property type."),
-        text,
-        {"intent": intent, "properties": [item.get("title") for item in matches]},
+    answer = str(
+        result.get("answer")
+        or "Which city, budget and property type would you prefer?"
     )
     if not await _is_current_turn(phone, message_id):
         return

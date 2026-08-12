@@ -65,9 +65,6 @@ class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
         ) as save_name, patch.object(
             whatsapp, "latest_booking", AsyncMock(return_value=booking)
         ), patch.object(
-            whatsapp, "generate_advisor_reply",
-            AsyncMock(side_effect=lambda required, *_args, **_kwargs: required),
-        ), patch.object(
             whatsapp, "save_message", AsyncMock()
         ):
             handled = await whatsapp._handle_customer_identity(
@@ -152,6 +149,16 @@ class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
             history.update_one.await_args.args[1]["$set"]["status"], "cancelled"
         )
         send.assert_awaited_once()
+
+    async def test_normal_message_does_not_run_cancellation_model_or_database(self):
+        with patch.object(
+            whatsapp, "classify_booking_cancellation", AsyncMock()
+        ) as classifier:
+            handled = await whatsapp._cancel_saved_booking(
+                "919999999999", "Please show me more Pune properties"
+            )
+        self.assertFalse(handled)
+        classifier.assert_not_awaited()
 
     async def test_callback_date_without_time_is_saved_then_time_is_requested(self):
         pending = {

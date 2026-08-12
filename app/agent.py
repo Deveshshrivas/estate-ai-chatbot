@@ -170,6 +170,25 @@ Return ONLY JSON: {"action":"...","reason":"short reason"}. Do not write a reply
 
 async def extract_customer_identity(text: str) -> dict[str, str | None]:
     """Extract a person's stated name through the model and preserve extra intent."""
+    cleaned = " ".join(text.strip().strip(".,|").split())
+    explicit = re.match(
+        r"(?i)^(?:my name is|i am|i'm|im|mera naam(?: hai)?|main)\s+"
+        r"([a-z][a-z .'-]{0,59}?)(?:\s+(?:hai|hoon))?$",
+        cleaned,
+    )
+    candidate = (explicit.group(1) if explicit else cleaned).strip(" .,|")
+    blocked = re.search(
+        r"(?i)\b(want|need|looking|property|flat|house|buy|rent|sell|book|"
+        r"appointment|visit|call|email|budget|city|show|help|hello|hii?|hey)\b",
+        candidate,
+    )
+    if (
+        candidate and not blocked and 1 <= len(candidate.split()) <= 5
+        and len(candidate) <= 60 and "@" not in candidate
+        and not any(character.isdigit() for character in candidate)
+        and re.fullmatch(r"[A-Za-z][A-Za-z .'-]*", candidate)
+    ):
+        return {"name": candidate.title(), "remaining_message": ""}
     prompt = """Extract the customer's own name from their WhatsApp message.
 Understand English, Hindi, Hinglish, misspellings and phrases such as "I am Devesh",
 "mera naam Govind hai", or a name sent alone. Never treat a city, property, greeting,
@@ -260,6 +279,10 @@ async def extract_schedule(
     fallback_slot, fallback_has_date, fallback_has_time = parse_requested_slot(
         text, saved_date, now
     )
+    # The local parser handles ordinary dates/times reliably. Use the model only
+    # for wording it cannot understand, such as unusual misspellings or idioms.
+    if fallback_has_date or fallback_has_time:
+        return fallback_slot, fallback_has_date, fallback_has_time
     prompt = """Extract an Indian customer appointment date and time. Resolve relative phrases,
 misspellings and ordinals such as tomorrow, day after tomorrow, tommorow, this Friday, or
 31st this month. Combine SAVED DATE with CUSTOMER MESSAGE. Use Asia/Kolkata and CURRENT TIME.
@@ -301,6 +324,21 @@ async def classify_property_response(
     """Use the LLM to understand a response to a displayed property gallery."""
     if not properties:
         return {"is_interested": False, "selected_property": None}
+    normalized = text.casefold()
+    selected = next(
+        (title for title in properties if title.casefold() in normalized), None
+    )
+    if selected:
+        is_question = bool(re.search(
+            r"\?|\b(what|where|which|how|does|is|are|can|photo|image|price|"
+            r"parking|rera|available|nearby|metro|amenities)\b",
+            normalized,
+        ))
+        return {
+            "is_interested": True,
+            "selected_property": selected,
+            "is_question": is_question,
+        }
     prompt = """You classify a user's reply after a real-estate assistant displayed listings.
 Decide whether the user is expressing interest in selecting or proceeding with one of the
 displayed properties. Understand natural language, misspellings, Hinglish, indirect approval,
@@ -529,6 +567,17 @@ cancellation. Return ONLY JSON: {"cancel": boolean}."""
         ))
 
 
+def might_cancel_booking(text: str) -> bool:
+    """Cheap high-recall gate; ordinary messages must not invoke cancellation AI."""
+    normalized = " ".join(text.casefold().replace("’", "'").split())
+    return bool(re.search(
+        r"\b(cancel|cancelled|canceled|cancellation|withdraw|call off|stop|postpone|reschedule|"
+        r"can't make|cannot make|cant make|won't make|wont make|not attend|"
+        r"skip (?:the )?(?:visit|call|meeting)|no longer (?:need|want))\b",
+        normalized,
+    ))
+
+
 async def classify_booking_type(text: str) -> str | None:
     """Classify how the customer wants to meet without inventing a choice."""
     normalized = " ".join(text.casefold().replace("’", "'").split())
@@ -546,6 +595,12 @@ async def classify_booking_type(text: str) -> str | None:
         normalized,
     ):
         return "appointment"
+    if re.fullmatch(
+        r"(?:yes[,. ]*)?(?:please[,. ]*)?(?:book|schedule|arrange)"
+        r"(?:\s+(?:it|this|that|now|please))?[.! ]*",
+        normalized,
+    ):
+        return None
     prompt = """Classify the customer's preferred real-estate booking type.
 Return ONLY JSON: {"booking_type":"site_visit"|"appointment"|null}.
 site_visit means physically visiting or seeing the property.
@@ -833,19 +888,26 @@ ever mentioned. INR amounts: lakh=100000, crore=10000000."""
         content.append({"type": "image_url", "image_url": {"url": state["image"]}})
     prior = [{"role": x["role"], "content": x["content"]} for x in state["history"][-8:]]
     model_name = "deterministic"
-    try:
-        result = await _create_completion(
-            model=settings.openrouter_model,
-            messages=[{"role": "system", "content": prompt}, *prior, {"role": "user", "content": content}],
-            temperature=0.1,
-            max_tokens=500,
-        )
-        model_intent = _json_object(result.choices[0].message.content or "{}")
-        model_name = result.model
-    except Exception:
-        # Availability fallback only; MongoDB remains the source of facts.
-        model_intent = {"intent": "general"}
-        model_name = "deterministic-fallback"
+    deterministic_route = bool(current_reliable) and not state.get("image") and not (
+        _explicitly_excluded_cities(state["message"])
+    )
+    if deterministic_route:
+        model_intent = dict(current_reliable)
+        model_name = "deterministic"
+    else:
+        try:
+            result = await _create_completion(
+                model=settings.openrouter_model,
+                messages=[{"role": "system", "content": prompt}, *prior, {"role": "user", "content": content}],
+                temperature=0.1,
+                max_tokens=500,
+            )
+            model_intent = _json_object(result.choices[0].message.content or "{}")
+            model_name = result.model
+        except Exception:
+            # Availability fallback only; MongoDB remains the source of facts.
+            model_intent = {"intent": "general"}
+            model_name = "deterministic-fallback"
     # Carry deterministic filters from earlier user turns into short follow-ups
     # such as "what about Gurugram?", then let the current message override them.
     previous_text = " ".join(

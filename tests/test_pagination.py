@@ -501,7 +501,7 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["intent"]["intent"], "general")
         self.assertEqual(result["model"], "deterministic-fallback")
 
-    async def test_recognizable_database_question_uses_llm_understanding(self):
+    async def test_recognizable_database_question_skips_llm_understanding(self):
         create = AsyncMock(return_value=SimpleNamespace(
             model="test-model",
             choices=[SimpleNamespace(message=SimpleNamespace(content='{"intent":"property_search","city":"Pune"}'))],
@@ -511,9 +511,9 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
                 "session_id": "fast-count", "message": "How many properties are in Pune?",
                 "history": [],
             })
-        create.assert_awaited_once()
+        create.assert_not_awaited()
         self.assertEqual(result["intent"]["_aggregate"], "count")
-        self.assertEqual(result["model"], "test-model")
+        self.assertEqual(result["model"], "deterministic")
 
     async def test_llm_city_correction_excludes_rejected_city(self):
         completion = SimpleNamespace(
@@ -549,6 +549,36 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(result["is_interested"])
         self.assertEqual(result["selected_property"], "Elara Koramangala 187")
+
+    async def test_exact_property_selection_skips_llm(self):
+        completion = AsyncMock()
+        with patch.object(agent, "_create_completion", completion):
+            result = await agent.classify_property_response(
+                "I like Elara Koramangala 187",
+                ["Elara Koramangala 187", "Solstice Koramangala 145"],
+            )
+        completion.assert_not_awaited()
+        self.assertTrue(result["is_interested"])
+        self.assertEqual(result["selected_property"], "Elara Koramangala 187")
+
+    async def test_standard_schedule_skips_llm(self):
+        completion = AsyncMock()
+        now = agent.datetime(2026, 8, 12, 10, 0, tzinfo=agent.timezone.utc)
+        with patch.object(agent, "_create_completion", completion):
+            slot, has_date, has_time = await agent.extract_schedule(
+                "15 Aug at 4 PM", now=now
+            )
+        completion.assert_not_awaited()
+        self.assertTrue(has_date)
+        self.assertTrue(has_time)
+        self.assertIsNotNone(slot)
+
+    async def test_plain_booking_request_skips_type_llm(self):
+        completion = AsyncMock()
+        with patch.object(agent, "_create_completion", completion):
+            booking_type = await agent.classify_booking_type("yes book it")
+        completion.assert_not_awaited()
+        self.assertIsNone(booking_type)
 
     async def test_advisor_reply_rejects_internal_reasoning_leak(self):
         leaked = """Here's a thinking process:

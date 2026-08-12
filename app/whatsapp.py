@@ -10,8 +10,7 @@ from pymongo.errors import DuplicateKeyError
 from .agent import (
     _is_greeting, advise_on_selected_property, classify_booking_cancellation,
     classify_booking_type, classify_property_response, extract_customer_identity,
-    extract_schedule, generate_advisor_reply,
-    generate_property_captions, graph,
+    extract_schedule, might_cancel_booking, graph,
 )
 from .config import get_settings
 from .customer_memory import (
@@ -141,10 +140,7 @@ async def _handle_customer_identity(
         await save_customer_name(phone, customer_name, database=db)
         booking = await latest_booking(phone, db)
         required = _booking_memory_text(customer_name, booking)
-        reply = await generate_advisor_reply(
-            required, text,
-            {"customer_name": customer_name, "latest_booking": booking},
-        )
+        reply = required
         await send(phone, reply)
         await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
         return True
@@ -159,10 +155,7 @@ async def _handle_customer_identity(
         return True
     booking = await latest_booking(phone, db)
     required = _booking_memory_text(customer_name, booking)
-    reply = await generate_advisor_reply(
-        required, text,
-        {"customer_name": customer_name, "latest_booking": booking},
-    )
+    reply = required
     await send(phone, reply)
     await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
     return True
@@ -271,10 +264,7 @@ async def process_message(message: dict[str, Any]) -> None:
             "message": text,
             "image": None,
         })
-        answer = await generate_advisor_reply(
-            str(result["answer"]), text,
-            {"intent": result.get("intent", {}), "properties": [item.get("title") for item in result.get("matches", [])]},
-        )
+        answer = str(result["answer"])
         intent = result.get("intent", {})
         matches = result.get("matches", [])
         focused_property = bool((result.get("page_info") or {}).get("focused_property"))
@@ -320,7 +310,7 @@ async def process_message(message: dict[str, Any]) -> None:
                     "price": _format_price(listing),
                     "fallback": fallback,
                 })
-            captions = await generate_property_captions(caption_cards, text)
+            captions = [card["fallback"] for card in caption_cards]
             for listing, caption in zip(matches[:listing_limit], captions):
                 for image_url in listing.get("images", [])[:images_per_listing]:
                     await send_image(sender, delivery_image_url(image_url), caption)
@@ -376,20 +366,6 @@ async def _handle_lead_details(
     )
     if confirmed_name:
         name = confirmed_name
-    if ai_replies:
-        raw_send = send
-
-        async def send(recipient: str, required_message: str) -> Any:
-            reply = await generate_advisor_reply(
-                required_message,
-                text,
-                {
-                    "stage": pending.get("stage"),
-                    "selected_property": pending.get("selected_property"),
-                    "customer_name": name or pending.get("whatsapp_name"),
-                },
-            )
-            return await raw_send(recipient, reply)
     properties = pending.get("matched_properties", [])
     stage = pending.get("stage", "showing_results")
     if ai_replies and _is_greeting(text) and stage.startswith("awaiting_"):
@@ -944,6 +920,8 @@ async def _cancel_saved_booking(
     ai_replies: bool = False,
 ) -> bool:
     """Cancel the newest active consultation request without deleting its audit record."""
+    if not might_cancel_booking(text):
+        return False
     booking = await db.leads.find_one(
         {
             "whatsapp_phone": phone,
@@ -990,12 +968,6 @@ async def _cancel_saved_booking(
         f"Your consultation request for {property_title} has been cancelled. "
         "You can book again anytime."
     )
-    if ai_replies:
-        confirmation = await generate_advisor_reply(
-            confirmation,
-            text,
-            {"property_title": property_title, "appointment_status": "cancelled"},
-        )
     await send(
         phone,
         confirmation,

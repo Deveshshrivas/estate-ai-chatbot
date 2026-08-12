@@ -21,7 +21,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from .agent import (
     advise_on_selected_property, classify_booking_cancellation,
-    classify_property_response, graph,
+    classify_property_response, graph, might_cancel_booking,
 )
 from .config import get_settings
 from .database import (
@@ -49,7 +49,7 @@ async def capture_web_lead(session_id: str, text: str) -> str | None:
             },
             sort=[("updated_at", -1)],
         )
-        if booking and await classify_booking_cancellation(text, booking):
+        if booking and might_cancel_booking(text) and await classify_booking_cancellation(text, booking):
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
             await db.leads.update_one(
