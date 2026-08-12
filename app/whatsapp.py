@@ -418,13 +418,26 @@ async def _handle_lead_details(
             if booking_type == "site_visit"
             else "awaiting_booking_email"
         )
+        chosen_preference = None
+        if booking_type == "appointment":
+            chosen_preference = (
+                "video_call" if re.search(r"\b(video|meet|zoom)\b", lowered)
+                else "phone_call" if re.search(
+                    r"\b(phone|voice|callback|call me|whatsapp call)\b", lowered
+                ) else None
+            )
+        booking_fields: dict[str, Any] = {
+            "booking_type": booking_type,
+        }
+        if chosen_preference:
+            booking_fields["contact_preference"] = chosen_preference
         if not confirmed_name:
             await db.pending_leads.update_one(
                 {"_id": pending["_id"]},
                 {"$set": {
                     "stage": "awaiting_booking_name",
                     "after_name_stage": next_stage,
-                    "booking_type": booking_type,
+                    **booking_fields,
                 }},
             )
             await send(phone, "Great. What name should I use for the booking?")
@@ -433,7 +446,7 @@ async def _handle_lead_details(
             {"_id": pending["_id"]},
             {"$set": {
                 "stage": next_stage,
-                "booking_type": booking_type,
+                **booking_fields,
                 "customer_name": confirmed_name,
                 "contact_phone": phone,
             }},

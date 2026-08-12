@@ -298,6 +298,28 @@ class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["after_name_stage"], "awaiting_site_visit_schedule")
         self.assertEqual(saved["booking_type"], "site_visit")
 
+    async def test_phone_appointment_choice_is_remembered(self):
+        pending = {
+            "_id": "pending-1", "session_id": "wa:918815096521",
+            "stage": "awaiting_booking_type", "selected_property": "Ivy 104",
+        }
+        pending_leads = SimpleNamespace(
+            find_one=AsyncMock(return_value=pending), update_one=AsyncMock()
+        )
+        send = AsyncMock()
+        with patch.object(
+            whatsapp, "db", SimpleNamespace(pending_leads=pending_leads)
+        ), patch.object(
+            whatsapp, "classify_booking_type", AsyncMock(return_value="appointment")
+        ):
+            handled = await whatsapp._handle_lead_details(
+                "918815096521", "", "Phone call please", send=send
+            )
+        self.assertTrue(handled)
+        saved = pending_leads.update_one.await_args.args[1]["$set"]
+        self.assertEqual(saved["booking_type"], "appointment")
+        self.assertEqual(saved["contact_preference"], "phone_call")
+
     async def test_first_property_question_fetches_database_row_and_answers_it(self):
         pending = {
             "_id": "pending-1", "session_id": "wa:918815096521",
