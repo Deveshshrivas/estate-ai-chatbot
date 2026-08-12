@@ -397,6 +397,7 @@ async def _sync_new_lead(phone: str, contact_id: str, conversation_id: str | Non
         f"Property: {lead.get('property_title') or 'Not selected'}",
         f"City: {lead.get('city') or ', '.join(lead.get('cities') or []) or 'Not provided'}",
         f"Schedule: {lead.get('preferred_schedule') or 'Not provided'}",
+        f"Booking type: {lead.get('booking_type') or 'Not selected'}",
         f"Preference: {lead.get('contact_preference') or 'Not provided'}",
         f"Email: {lead.get('email') or 'Not provided'}",
         f"WhatsApp: +{phone}",

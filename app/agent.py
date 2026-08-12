@@ -529,6 +529,47 @@ cancellation. Return ONLY JSON: {"cancel": boolean}."""
         ))
 
 
+async def classify_booking_type(text: str) -> str | None:
+    """Classify how the customer wants to meet without inventing a choice."""
+    normalized = " ".join(text.casefold().replace("’", "'").split())
+    if re.search(
+        r"\b(site\s*visit(?:ing)?|property\s*visit(?:ing)?|physical\s*visit|visit\s+(?:the\s+)?"
+        r"(?:site|property|flat|house|home)|see\s+(?:the\s+)?(?:property|flat|house|home)"
+        r"|come\s+(?:and\s+)?see)\b",
+        normalized,
+    ):
+        return "site_visit"
+    if re.search(
+        r"\b(phone\s*call|voice\s*call|video\s*call|google\s*meet|zoom|whatsapp\s*call|"
+        r"advisor\s*(?:call|appointment)|appointment|consultation|online\s*meeting|callback|"
+        r"call\s+me|speak\s+to\s+(?:an?\s+)?advisor)\b",
+        normalized,
+    ):
+        return "appointment"
+    prompt = """Classify the customer's preferred real-estate booking type.
+Return ONLY JSON: {"booking_type":"site_visit"|"appointment"|null}.
+site_visit means physically visiting or seeing the property.
+appointment means a phone/video/online consultation with an advisor.
+Use null when the customer only says book/schedule/yes and has not chosen how to meet.
+Understand English, Hindi, Hinglish, misspellings, and indirect wording. Never guess."""
+    try:
+        result = await _create_completion(
+            model=settings.openrouter_model,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+            max_tokens=80,
+        )
+        booking_type = _json_object(
+            result.choices[0].message.content or "{}"
+        ).get("booking_type")
+        return booking_type if booking_type in {"site_visit", "appointment"} else None
+    except Exception:
+        return None
+
+
 class AgentState(TypedDict, total=False):
     session_id: str
     message: str

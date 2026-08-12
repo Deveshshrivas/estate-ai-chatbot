@@ -9,7 +9,8 @@ from collections.abc import Awaitable, Callable
 from pymongo.errors import DuplicateKeyError
 from .agent import (
     _is_greeting, advise_on_selected_property, classify_booking_cancellation,
-    classify_property_response, extract_customer_identity, extract_schedule, generate_advisor_reply,
+    classify_booking_type, classify_property_response, extract_customer_identity,
+    extract_schedule, generate_advisor_reply,
     generate_property_captions, graph,
 )
 from .config import get_settings
@@ -404,6 +405,44 @@ async def _handle_lead_details(
             "Would you like to continue?",
         )
         return True
+    if stage == "awaiting_booking_type":
+        booking_type = await classify_booking_type(text)
+        if not booking_type:
+            await send(
+                phone,
+                "Would you prefer a site visit or an advisor appointment by phone/video call?",
+            )
+            return True
+        next_stage = (
+            "awaiting_site_visit_schedule"
+            if booking_type == "site_visit"
+            else "awaiting_booking_email"
+        )
+        if not confirmed_name:
+            await db.pending_leads.update_one(
+                {"_id": pending["_id"]},
+                {"$set": {
+                    "stage": "awaiting_booking_name",
+                    "after_name_stage": next_stage,
+                    "booking_type": booking_type,
+                }},
+            )
+            await send(phone, "Great. What name should I use for the booking?")
+            return True
+        await db.pending_leads.update_one(
+            {"_id": pending["_id"]},
+            {"$set": {
+                "stage": next_stage,
+                "booking_type": booking_type,
+                "customer_name": confirmed_name,
+                "contact_phone": phone,
+            }},
+        )
+        if booking_type == "site_visit":
+            await send(phone, "What date and time would you like to visit the property?")
+        else:
+            await send(phone, "What email should I use for the appointment confirmation?")
+        return True
     if stage == "awaiting_booking_name":
         identity = await extract_customer_identity(text)
         customer_name = str(identity.get("name") or "").strip()
@@ -566,6 +605,7 @@ async def _handle_lead_details(
                 "name": name or pending.get("whatsapp_name") or phone,
                 "email": email.group(0), "phone": phone, "source": "whatsapp",
                 "status": "scheduled", "lead_stage": "site_visit_scheduled",
+                "booking_type": "site_visit",
                 "appointment_status": "scheduled", "preferred_schedule": slot,
                 "site_visit_id": visit["id"], "assigned_to": visit["owner_id"],
                 "assigned_name": visit["owner"], "updated_at": now,
@@ -619,6 +659,7 @@ async def _handle_lead_details(
                     "whatsapp_phone": phone, "contact_preference": preference,
                     "source": "whatsapp", "status": "qualified",
                     "lead_stage": "appointment_requested",
+                    "booking_type": "appointment",
                     "appointment_status": "requested",
                     "preferred_schedule": schedule,
                     "property_title": pending.get("selected_property"),
@@ -664,6 +705,7 @@ async def _handle_lead_details(
                 "contact_preference": pending.get("contact_preference") or "phone_call",
                 "source": "whatsapp",
                 "status": "qualified", "lead_stage": "appointment_requested",
+                "booking_type": "appointment",
                 "appointment_status": "requested",
                 "preferred_schedule": pending.get("preferred_schedule"),
                 "updated_at": now,
@@ -784,10 +826,18 @@ async def _handle_lead_details(
                 "answer": "I can help with details about this property.",
             }
         if decision["action"] == "book":
-            wants_site_visit = bool(re.search(
-                r"\b(site\s*visit|property\s*visit|visit\s*(?:the\s*)?(?:site|property|home|flat)|see\s*(?:the\s*)?(?:property|flat|home)|physical\s*visit)\b",
-                lowered,
-            ))
+            booking_type = await classify_booking_type(text)
+            if not booking_type:
+                await db.pending_leads.update_one(
+                    {"_id": pending["_id"]},
+                    {"$set": {"stage": "awaiting_booking_type"}},
+                )
+                await send(
+                    phone,
+                    "Would you prefer a site visit or an advisor appointment by phone/video call?",
+                )
+                return True
+            wants_site_visit = booking_type == "site_visit"
             if not confirmed_name:
                 await db.pending_leads.update_one(
                     {"_id": pending["_id"]},
@@ -797,7 +847,7 @@ async def _handle_lead_details(
                             "awaiting_site_visit_schedule" if wants_site_visit
                             else "awaiting_booking_email"
                         ),
-                        "booking_type": "site_visit" if wants_site_visit else "consultation",
+                        "booking_type": booking_type,
                     }},
                 )
                 await send(phone, "Great—before I arrange it, what name should I use for your booking?")

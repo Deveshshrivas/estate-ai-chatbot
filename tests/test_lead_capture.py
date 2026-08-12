@@ -241,6 +241,63 @@ class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lead_update["appointment_status"], "not_booked")
         self.assertEqual(lead_update["property_title"], "Ivy Sarjapur Road 104")
 
+    async def test_ambiguous_booking_asks_site_visit_or_appointment(self):
+        pending = {
+            "_id": "pending-1", "session_id": "wa:918815096521",
+            "stage": "interested", "selected_property": "Ivy Sarjapur Road 104",
+            "matched_properties": ["Ivy Sarjapur Road 104"],
+        }
+        pending_leads = SimpleNamespace(
+            find_one=AsyncMock(return_value=pending), update_one=AsyncMock()
+        )
+        properties = SimpleNamespace(
+            find_one=AsyncMock(return_value={"title": "Ivy Sarjapur Road 104"})
+        )
+        send = AsyncMock()
+        with patch.object(
+            whatsapp, "db", SimpleNamespace(
+                pending_leads=pending_leads, properties=properties
+            ),
+        ), patch.object(
+            whatsapp, "advise_on_selected_property",
+            AsyncMock(return_value={"action": "book", "wants_images": False}),
+        ), patch.object(
+            whatsapp, "classify_booking_type", AsyncMock(return_value=None)
+        ):
+            handled = await whatsapp._handle_lead_details(
+                "918815096521", "Devesh", "Yes, book it", send=send
+            )
+        self.assertTrue(handled)
+        saved = pending_leads.update_one.await_args.args[1]["$set"]
+        self.assertEqual(saved["stage"], "awaiting_booking_type")
+        reply = send.await_args.args[1].lower()
+        self.assertIn("site visit", reply)
+        self.assertIn("appointment", reply)
+
+    async def test_site_visit_choice_advances_to_name_then_schedule(self):
+        pending = {
+            "_id": "pending-1", "session_id": "wa:918815096521",
+            "stage": "awaiting_booking_type",
+            "selected_property": "Ivy Sarjapur Road 104",
+        }
+        pending_leads = SimpleNamespace(
+            find_one=AsyncMock(return_value=pending), update_one=AsyncMock()
+        )
+        send = AsyncMock()
+        with patch.object(
+            whatsapp, "db", SimpleNamespace(pending_leads=pending_leads)
+        ), patch.object(
+            whatsapp, "classify_booking_type", AsyncMock(return_value="site_visit")
+        ):
+            handled = await whatsapp._handle_lead_details(
+                "918815096521", "", "I want to come and see it", send=send
+            )
+        self.assertTrue(handled)
+        saved = pending_leads.update_one.await_args.args[1]["$set"]
+        self.assertEqual(saved["stage"], "awaiting_booking_name")
+        self.assertEqual(saved["after_name_stage"], "awaiting_site_visit_schedule")
+        self.assertEqual(saved["booking_type"], "site_visit")
+
     async def test_first_property_question_fetches_database_row_and_answers_it(self):
         pending = {
             "_id": "pending-1", "session_id": "wa:918815096521",
