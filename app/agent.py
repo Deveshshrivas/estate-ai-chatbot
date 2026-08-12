@@ -91,6 +91,8 @@ def _safe_customer_reply(reply: str) -> bool:
         "chain of thought", "step-by-step reasoning", "here's my reasoning",
         "analysis:", "final answer:", "return plain text only",
         "required_message", "verified_context",
+        "welcome the customer", "ask the customer", "acknowledge the customer",
+        "write the whatsapp reply", "in one short message",
     )
     return bool(value) and len(value) <= 500 and len(value.split()) <= 70 and not any(
         marker in lowered for marker in forbidden
@@ -103,6 +105,13 @@ async def generate_advisor_reply(
     context: dict[str, Any] | None = None,
 ) -> str:
     """Let the model speak naturally while preserving validated application facts."""
+    verified_context = context or {}
+    explicit_fallback = str(verified_context.get("customer_fallback") or "").strip()
+    fallback = (
+        explicit_fallback if _safe_customer_reply(explicit_fallback)
+        else required_message if _safe_customer_reply(required_message)
+        else "Sorry, I couldn't prepare that reply just now. Please try again in a moment."
+    )
     prompt = """You are Aira, a concise and human Indian real-estate advisor.
 Write the WhatsApp reply that fulfils REQUIRED MESSAGE using CUSTOMER MESSAGE and VERIFIED CONTEXT.
 Begin by naturally acknowledging the customer's latest choice, correction, answer or concern.
@@ -120,16 +129,16 @@ Do not restart or repeat the conversation. Use at most 45 words. Return plain te
                 {"role": "user", "content": json.dumps({
                     "required_message": required_message,
                     "customer_message": customer_message,
-                    "verified_context": context or {},
+                    "verified_context": verified_context,
                 }, ensure_ascii=False, default=str)},
             ],
             temperature=0.25,
             max_tokens=100,
         )
         reply = str(result.choices[0].message.content or "").strip()
-        return reply if _safe_customer_reply(reply) else required_message
+        return reply if _safe_customer_reply(reply) else fallback
     except Exception:
-        return required_message
+        return fallback
 
 
 async def finalize_agent_answer(

@@ -605,6 +605,26 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(reply, natural)
 
+    async def test_advisor_reply_never_falls_back_to_internal_instruction(self):
+        with patch.object(
+            agent, "_create_completion", AsyncMock(side_effect=RuntimeError("rate limited"))
+        ):
+            reply = await agent.generate_advisor_reply(
+                "Welcome the customer and ask their name in one short message.",
+                "hii",
+            )
+        self.assertNotIn("welcome the customer", reply.casefold())
+        self.assertNotIn("ask their name", reply.casefold())
+        self.assertTrue(agent._safe_customer_reply(reply))
+
+    async def test_advisor_reply_uses_customer_ready_fallback_when_rate_limited(self):
+        fallback = "Hi! Welcome to Pratap AI Property Advisor. What name should I use for you?"
+        with patch.object(
+            agent, "_create_completion", AsyncMock(side_effect=RuntimeError("rate limited"))
+        ):
+            reply = await agent.generate_advisor_reply(fallback, "hii")
+        self.assertEqual(reply, fallback)
+
     async def test_finalizer_reuses_existing_llm_answer_without_second_call(self):
         writer = AsyncMock()
         with patch.object(agent, "generate_advisor_reply", writer):

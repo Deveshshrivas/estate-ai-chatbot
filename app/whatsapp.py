@@ -135,7 +135,7 @@ async def _handle_customer_identity(
         customer_name = str(identity.get("name") or "").strip()
         if not customer_name:
             reply = await generate_advisor_reply(
-                "Ask the customer what name to use while staying concise and welcoming.",
+                "I didn't catch your name. What should I call you?",
                 text,
                 {"stage": "awaiting_name"},
             )
@@ -158,7 +158,7 @@ async def _handle_customer_identity(
     if not profile.get("name_confirmed") or not customer_name:
         await request_customer_name(phone, db)
         reply = await generate_advisor_reply(
-            "Welcome the customer and ask their name in one short message.",
+            "Hi! Welcome to Pratap AI Property Advisor. What name should I use for you?",
             text,
             {"stage": "new_customer"},
         )
