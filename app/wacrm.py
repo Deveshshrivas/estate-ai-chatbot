@@ -13,7 +13,9 @@ import httpx
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from .agent import generate_sales_followup, graph
+from .agent import (
+    finalize_agent_answer, generate_advisor_reply, generate_sales_followup, graph,
+)
 from .config import get_settings
 from .database import db, save_message
 from .whatsapp import (
@@ -561,6 +563,11 @@ async def _process_current_turn(
         if await _is_current_turn(phone, message_id):
             return await send_image(to, url, caption)
         return None
+
+    async def write_reply(required_message: str, context: dict[str, Any] | None = None) -> str:
+        return await generate_advisor_reply(
+            required_message, text, context or {},
+        )
     await db.public_form_leads.update_many(
         {"phone": phone, "status": {"$in": ["template_scheduled", "template_sent"]}},
         {"$set": {"status": "customer_replied", "replied_at": now, "updated_at": now}},
@@ -585,7 +592,10 @@ async def _process_current_turn(
                 "last_customer_message": text, "updated_at": now,
             }},
         )
-        answer = "Understood. We have stopped all sales follow-ups and will not message you again. Thank you."
+        answer = await write_reply(
+            "Understood. We have stopped all sales follow-ups and will not message you again. Thank you.",
+            {"campaign_status": "opted_out"},
+        )
         await send_current_text(phone, answer)
         return
     if campaign:
@@ -612,7 +622,10 @@ async def _process_current_turn(
     if _is_goodbye(text):
         await db.pending_leads.delete_many({"session_id": f"wa:{phone}"})
         if await _is_current_turn(phone, message_id):
-            answer = "Thanks for chatting with us. You can message again whenever you need property help."
+            answer = await write_reply(
+                "Thanks for chatting with us. You can message again whenever you need property help.",
+                {"contact_name": contact.get("name") or ""},
+            )
             await send_text(phone, answer)
             await save_message(f"wa:{phone}", "assistant", answer, channel="whatsapp")
         return
@@ -622,6 +635,7 @@ async def _process_current_turn(
             "We currently have properties in " + ", ".join(cities) + ". Which city interests you?"
             if cities else "Our live inventory is being updated. Which city interests you?"
         )
+        answer = await write_reply(answer, {"available_cities": cities})
         if await _is_current_turn(phone, message_id):
             await send_text(phone, answer)
             await save_message(f"wa:{phone}", "assistant", answer, channel="whatsapp")
@@ -651,7 +665,10 @@ async def _process_current_turn(
             }},
             upsert=True,
         )
-        answer = "Yes, I can arrange a callback with a property advisor. What future day and time works for you?"
+        answer = await write_reply(
+            "Yes, I can arrange a callback with a property advisor. What future day and time works for you?",
+            {"contact_name": contact.get("name") or ""},
+        )
         if await _is_current_turn(phone, message_id):
             await send_text(phone, answer)
             await save_message(f"wa:{phone}", "assistant", answer, channel="whatsapp")
@@ -720,9 +737,15 @@ async def _process_current_turn(
             if not await _is_current_turn(phone, message_id):
                 return
             await send_image(phone, delivery_image_url(image_url), caption)
-    answer = str(
-        result.get("answer")
-        or "Which city, budget and property type would you prefer?"
+    if not result.get("answer"):
+        result["answer"] = "Ask which city, budget and property type the customer prefers."
+    answer = await finalize_agent_answer(
+        result,
+        text,
+        {
+            "intent": intent,
+            "properties": [item.get("title") for item in matches],
+        },
     )
     if not await _is_current_turn(phone, message_id):
         return

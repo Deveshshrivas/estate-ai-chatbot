@@ -132,6 +132,17 @@ Do not restart or repeat the conversation. Use at most 45 words. Return plain te
         return required_message
 
 
+async def finalize_agent_answer(
+    result: dict[str, Any], customer_message: str,
+    context: dict[str, Any] | None = None,
+) -> str:
+    """Use an existing model answer once, otherwise make exactly one writing call."""
+    answer = str(result.get("answer") or "").strip()
+    if result.get("answer_ready") and _safe_customer_reply(answer):
+        return answer
+    return await generate_advisor_reply(answer, customer_message, context or {})
+
+
 async def classify_customer_control(
     customer_message: str, context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -635,6 +646,7 @@ class AgentState(TypedDict, total=False):
     page_info: dict[str, Any]
     knowledge: list[dict[str, Any]]
     answer: str
+    answer_ready: bool
     model: str
     grounded: bool
     evidence: list[dict[str, Any]]
@@ -1857,6 +1869,7 @@ All financial/legal guidance is general and should be verified professionally.""
         )
         return {
             "answer": result.choices[0].message.content or _offline_answer(state),
+            "answer_ready": True,
             "model": result.model, "grounded": False,
         }
     except Exception:

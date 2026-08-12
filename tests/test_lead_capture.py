@@ -39,6 +39,9 @@ class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             whatsapp, "request_customer_name", AsyncMock()
         ) as request_name, patch.object(
+            whatsapp, "generate_advisor_reply",
+            AsyncMock(return_value="Hello! What name should I use for you?"),
+        ), patch.object(
             whatsapp, "save_message", AsyncMock()
         ):
             handled = await whatsapp._handle_customer_identity(
@@ -64,6 +67,9 @@ class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
             whatsapp, "save_customer_name", AsyncMock()
         ) as save_name, patch.object(
             whatsapp, "latest_booking", AsyncMock(return_value=booking)
+        ), patch.object(
+            whatsapp, "generate_advisor_reply",
+            AsyncMock(side_effect=lambda required, *_args, **_kwargs: required),
         ), patch.object(
             whatsapp, "save_message", AsyncMock()
         ):

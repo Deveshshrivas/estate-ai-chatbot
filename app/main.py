@@ -21,7 +21,8 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from .agent import (
     advise_on_selected_property, classify_booking_cancellation,
-    classify_property_response, graph, might_cancel_booking,
+    classify_property_response, finalize_agent_answer, generate_advisor_reply,
+    graph, might_cancel_booking,
 )
 from .config import get_settings
 from .database import (
@@ -678,6 +679,9 @@ async def chat_socket(ws: WebSocket, session_id: str):
             try:
                 lead_reply = await capture_web_lead(session_id, text)
                 if lead_reply:
+                    lead_reply = await generate_advisor_reply(
+                        lead_reply, text, {"channel": "web", "session_id": session_id}
+                    )
                     await save_message(session_id, "assistant", lead_reply)
                     await ws.send_json({"type": "message", "content": lead_reply,
                                         "listings": [], "model": "lead-capture", "id": message_id})
@@ -689,7 +693,15 @@ async def chat_socket(ws: WebSocket, session_id: str):
                 })
                 listings = result.get("matches", [])
                 intent = result.get("intent", {})
-                answer = result["answer"]
+                answer = await finalize_agent_answer(
+                    result,
+                    text,
+                    {
+                        "channel": "web",
+                        "intent": intent,
+                        "properties": [item.get("title") for item in listings],
+                    },
+                )
                 await capture_engaged_lead(
                     session_id=session_id,
                     source="web",

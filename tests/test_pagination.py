@@ -605,6 +605,26 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(reply, natural)
 
+    async def test_finalizer_reuses_existing_llm_answer_without_second_call(self):
+        writer = AsyncMock()
+        with patch.object(agent, "generate_advisor_reply", writer):
+            reply = await agent.finalize_agent_answer(
+                {"answer": "Sure—what would you like to know?", "answer_ready": True},
+                "Tell me more",
+            )
+        writer.assert_not_awaited()
+        self.assertEqual(reply, "Sure—what would you like to know?")
+
+    async def test_finalizer_writes_database_result_once(self):
+        writer = AsyncMock(return_value="I found five Pune homes. Want to see them?")
+        with patch.object(agent, "generate_advisor_reply", writer):
+            reply = await agent.finalize_agent_answer(
+                {"answer": "There are 5 matching properties in Pune."},
+                "How many properties are in Pune?",
+            )
+        writer.assert_awaited_once()
+        self.assertIn("five Pune homes", reply)
+
     async def test_property_caption_is_llm_written_with_locked_facts(self):
         generated = (
             "🏡 Aster Koramangala 173\n📍 Koramangala, Bengaluru\n"

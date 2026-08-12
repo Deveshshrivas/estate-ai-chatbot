@@ -10,7 +10,8 @@ from pymongo.errors import DuplicateKeyError
 from .agent import (
     _is_greeting, advise_on_selected_property, classify_booking_cancellation,
     classify_booking_type, classify_property_response, extract_customer_identity,
-    extract_schedule, might_cancel_booking, graph,
+    extract_schedule, finalize_agent_answer, generate_advisor_reply,
+    might_cancel_booking, graph,
 )
 from .config import get_settings
 from .customer_memory import (
@@ -133,14 +134,21 @@ async def _handle_customer_identity(
         identity = await extract_customer_identity(text)
         customer_name = str(identity.get("name") or "").strip()
         if not customer_name:
-            reply = "I’d be happy to help 👋 What name should I use for you?"
+            reply = await generate_advisor_reply(
+                "Ask the customer what name to use while staying concise and welcoming.",
+                text,
+                {"stage": "awaiting_name"},
+            )
             await send(phone, reply)
             await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
             return True
         await save_customer_name(phone, customer_name, database=db)
         booking = await latest_booking(phone, db)
         required = _booking_memory_text(customer_name, booking)
-        reply = required
+        reply = await generate_advisor_reply(
+            required, text,
+            {"customer_name": customer_name, "latest_booking": booking},
+        )
         await send(phone, reply)
         await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
         return True
@@ -149,13 +157,20 @@ async def _handle_customer_identity(
     customer_name = str(profile.get("name") or "").strip()
     if not profile.get("name_confirmed") or not customer_name:
         await request_customer_name(phone, db)
-        reply = "Hello 👋 May I know your name?"
+        reply = await generate_advisor_reply(
+            "Welcome the customer and ask their name in one short message.",
+            text,
+            {"stage": "new_customer"},
+        )
         await send(phone, reply)
         await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
         return True
     booking = await latest_booking(phone, db)
     required = _booking_memory_text(customer_name, booking)
-    reply = required
+    reply = await generate_advisor_reply(
+        required, text,
+        {"customer_name": customer_name, "latest_booking": booking},
+    )
     await send(phone, reply)
     await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
     return True
@@ -264,7 +279,16 @@ async def process_message(message: dict[str, Any]) -> None:
             "message": text,
             "image": None,
         })
-        answer = str(result["answer"])
+        answer = await finalize_agent_answer(
+            result,
+            text,
+            {
+                "intent": result.get("intent", {}),
+                "properties": [
+                    item.get("title") for item in result.get("matches", [])
+                ],
+            },
+        )
         intent = result.get("intent", {})
         matches = result.get("matches", [])
         focused_property = bool((result.get("page_info") or {}).get("focused_property"))
@@ -366,6 +390,20 @@ async def _handle_lead_details(
     )
     if confirmed_name:
         name = confirmed_name
+    if ai_replies:
+        raw_send = send
+
+        async def send(recipient: str, required_message: str) -> Any:
+            reply = await generate_advisor_reply(
+                required_message,
+                text,
+                {
+                    "stage": pending.get("stage"),
+                    "selected_property": pending.get("selected_property"),
+                    "customer_name": name or pending.get("whatsapp_name"),
+                },
+            )
+            return await raw_send(recipient, reply)
     properties = pending.get("matched_properties", [])
     stage = pending.get("stage", "showing_results")
     if ai_replies and _is_greeting(text) and stage.startswith("awaiting_"):
@@ -968,6 +1006,12 @@ async def _cancel_saved_booking(
         f"Your consultation request for {property_title} has been cancelled. "
         "You can book again anytime."
     )
+    if ai_replies:
+        confirmation = await generate_advisor_reply(
+            confirmation,
+            text,
+            {"property_title": property_title, "appointment_status": "cancelled"},
+        )
     await send(
         phone,
         confirmation,
