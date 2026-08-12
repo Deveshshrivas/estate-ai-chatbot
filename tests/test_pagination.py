@@ -625,6 +625,13 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
             reply = await agent.generate_advisor_reply(fallback, "hii")
         self.assertEqual(reply, fallback)
 
+    async def test_rate_limited_identity_does_not_treat_greeting_as_name(self):
+        with patch.object(
+            agent, "_create_completion", AsyncMock(side_effect=RuntimeError("rate limited"))
+        ):
+            identity = await agent.extract_customer_identity("hii")
+        self.assertIsNone(identity["name"])
+
     async def test_finalizer_reuses_existing_llm_answer_without_second_call(self):
         writer = AsyncMock()
         with patch.object(agent, "generate_advisor_reply", writer):

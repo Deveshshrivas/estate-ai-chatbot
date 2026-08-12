@@ -240,9 +240,15 @@ remaining_message contains any request besides the name, otherwise an empty stri
         candidate = re.sub(
             r"(?i)^\s*(?:my name is|i am|i'm|im|mera naam)\s+", "", text
         ).strip(" .,|")
+        blocked = re.search(
+            r"(?i)\b(want|need|looking|property|flat|house|buy|rent|sell|book|"
+            r"appointment|visit|call|email|budget|city|show|help|hello|hii?|hey)\b",
+            candidate,
+        )
         valid = (
             1 <= len(candidate.split()) <= 5 and len(candidate) <= 60
             and "@" not in candidate and not any(char.isdigit() for char in candidate)
+            and not blocked and bool(re.fullmatch(r"[A-Za-z][A-Za-z .'-]*", candidate))
         )
         return {"name": candidate if valid else None, "remaining_message": ""}
 
