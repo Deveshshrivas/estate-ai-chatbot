@@ -65,23 +65,38 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {settings.wacrm_api_key}"}
 
 
-async def _request(method: str, path: str, **kwargs) -> dict[str, Any] | None:
+async def _request(
+    method: str, path: str, *, retryable: bool = False, **kwargs
+) -> dict[str, Any] | None:
     if not is_configured():
         return None
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.request(
-            method, f"{settings.wacrm_api_url.rstrip('/')}{path}",
-            headers=_headers(), **kwargs,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        return payload.get("data", payload)
+    attempts = 3 if retryable else 1
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
+        for attempt in range(attempts):
+            try:
+                response = await client.request(
+                    method, f"{settings.wacrm_api_url.rstrip('/')}{path}",
+                    headers=_headers(), **kwargs,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                return payload.get("data", payload)
+            except (httpx.TimeoutException, httpx.NetworkError):
+                if attempt + 1 >= attempts:
+                    raise
+            except httpx.HTTPStatusError as exc:
+                if attempt + 1 >= attempts or exc.response.status_code not in {
+                    429, 500, 502, 503, 504,
+                }:
+                    raise
+            await asyncio.sleep(0.25 * (2 ** attempt))
+    return None
 
 
 async def get_contact(contact_id: str) -> dict[str, Any] | None:
     if not contact_id:
         return None
-    return await _request("GET", f"/api/v1/contacts/{contact_id}")
+    return await _request("GET", f"/api/v1/contacts/{contact_id}", retryable=True)
 
 
 async def mark_read(message_id: str) -> None:
@@ -91,7 +106,10 @@ async def mark_read(message_id: str) -> None:
     try:
         # Some WACRM deployments expose this endpoint. Prefer it when present
         # so message transport stays centralized.
-        await _request("POST", "/api/v1/messages/read", json={"message_id": message_id})
+        await _request(
+            "POST", "/api/v1/messages/read",
+            retryable=True, json={"message_id": message_id},
+        )
         return
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 404:
@@ -524,28 +542,34 @@ async def process_inbound(data: dict[str, Any]) -> None:
         })
     except DuplicateKeyError:
         return
-    contact = await get_contact(str(data.get("contact_id") or ""))
-    if not contact or not contact.get("phone"):
-        return
-    phone = str(contact["phone"]).lstrip("+")
-    text = str(data.get("text") or "").strip()
-    if not text:
-        return
-    await _register_turn(phone, message_id)
-    token = await _acquire_conversation_lock(phone)
-    if not token:
-        await db.webhook_errors.insert_one({
-            "message_id": message_id,
-            "error": "Timed out waiting for the per-customer conversation lock",
-            "created_at": datetime.now(timezone.utc),
-        })
-        return
     try:
-        if not await _is_current_turn(phone, message_id):
+        contact = await get_contact(str(data.get("contact_id") or ""))
+        if not contact or not contact.get("phone"):
             return
-        await _process_current_turn(data, message_id, contact, phone, text)
-    finally:
-        await _release_conversation_lock(phone, token)
+        phone = str(contact["phone"]).lstrip("+")
+        text = str(data.get("text") or "").strip()
+        if not text:
+            return
+        await _register_turn(phone, message_id)
+        token = await _acquire_conversation_lock(phone)
+        if not token:
+            await db.webhook_errors.insert_one({
+                "message_id": message_id,
+                "error": "Timed out waiting for the per-customer conversation lock",
+                "created_at": datetime.now(timezone.utc),
+            })
+            raise RuntimeError("Timed out waiting for the conversation lock")
+        try:
+            if not await _is_current_turn(phone, message_id):
+                return
+            await _process_current_turn(data, message_id, contact, phone, text)
+        finally:
+            await _release_conversation_lock(phone, token)
+    except Exception:
+        # A failed event must be claimable when WACRM retries the webhook.
+        # Keeping the unique id after failure would silently discard that retry.
+        await db.webhook_events.delete_one({"message_id": message_id})
+        raise
 
 
 async def _process_current_turn(

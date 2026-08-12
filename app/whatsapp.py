@@ -385,7 +385,10 @@ async def process_message(message: dict[str, Any]) -> None:
         try:
             await send_text(sender, "Sorry, I hit a temporary issue. Please try again in a moment.")
         except Exception:
-            pass
+            # Let Meta retry when neither the normal response nor the fallback
+            # reached the customer. The webhook id becomes claimable again.
+            await db.webhook_events.delete_one({"message_id": message_id})
+            raise
 
 
 async def _handle_lead_details(

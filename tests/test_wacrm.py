@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import httpx
 import time
 import unittest
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from app import agent, wacrm
 from app import main
 from starlette.requests import Request
+from fastapi import Response
 
 
 def request_with_json(path: str, payload: dict, headers: list[tuple[bytes, bytes]] | None = None):
@@ -30,6 +32,46 @@ def request_with_json(path: str, payload: dict, headers: list[tuple[bytes, bytes
 
 
 class WacrmTests(unittest.IsolatedAsyncioTestCase):
+    async def test_readiness_rejects_free_model_for_production(self):
+        response = Response()
+        with patch.object(main.client.admin, "command", AsyncMock()), patch.object(
+            main.settings, "openrouter_api_key", "configured"
+        ), patch.object(
+            main.settings, "openrouter_model", "openrouter/free"
+        ), patch.object(
+            main.settings, "wacrm_api_url", "https://wacrm.example"
+        ), patch.object(
+            main.settings, "wacrm_api_key", "configured"
+        ), patch.object(
+            main.settings, "wacrm_webhook_secret", "configured"
+        ), patch.object(
+            main.settings, "cron_secret", "configured"
+        ), patch.object(
+            main.settings, "property_admin_secret", "configured"
+        ):
+            result = await main.readiness(response)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(result["status"], "not_ready")
+        self.assertFalse(result["checks"]["llm"]["ok"])
+
+    async def test_safe_wacrm_get_retries_transient_error(self):
+        request = AsyncMock(side_effect=[
+            httpx.ReadTimeout("timeout"),
+            httpx.Response(
+                200, json={"data": {"id": "contact-1"}},
+                request=httpx.Request("GET", "https://wacrm.example/contact"),
+            ),
+        ])
+        client = AsyncMock()
+        client.__aenter__.return_value.request = request
+        client.__aexit__.return_value = None
+        with patch.object(wacrm, "is_configured", return_value=True), patch.object(
+            wacrm.httpx, "AsyncClient", return_value=client
+        ), patch.object(wacrm.asyncio, "sleep", AsyncMock()):
+            result = await wacrm._request("GET", "/contact", retryable=True)
+        self.assertEqual(result, {"id": "contact-1"})
+        self.assertEqual(request.await_count, 2)
+
     async def test_wacrm_webhook_awaits_inbound_processing(self):
         process = AsyncMock()
         request = request_with_json(
@@ -42,6 +84,21 @@ class WacrmTests(unittest.IsolatedAsyncioTestCase):
             response = await main.receive_wacrm_webhook(request)
         process.assert_awaited_once()
         self.assertEqual(response["status"], "accepted")
+
+    async def test_failed_wacrm_event_is_released_for_provider_retry(self):
+        events = SimpleNamespace(
+            insert_one=AsyncMock(), delete_one=AsyncMock(),
+        )
+        fake_db = SimpleNamespace(webhook_events=events)
+        with patch.object(wacrm, "db", fake_db), patch.object(
+            wacrm, "get_contact", AsyncMock(side_effect=RuntimeError("temporary outage"))
+        ):
+            with self.assertRaisesRegex(RuntimeError, "temporary outage"):
+                await wacrm.process_inbound({
+                    "whatsapp_message_id": "wamid-retry", "contact_id": "contact-1",
+                    "text": "hello",
+                })
+        events.delete_one.assert_awaited_once_with({"message_id": "wamid-retry"})
 
     async def test_meta_webhook_awaits_message_processing(self):
         process = AsyncMock()

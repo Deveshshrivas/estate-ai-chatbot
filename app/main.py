@@ -2,7 +2,9 @@ import asyncio
 import hmac
 import html
 import json
+import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
@@ -35,6 +37,13 @@ from .whatsapp import (
 )
 from .site_visits import display_slot, parse_requested_slot
 from . import wacrm
+
+
+logger = logging.getLogger("estate_ai")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 
 async def capture_web_lead(session_id: str, text: str) -> str | None:
@@ -234,7 +243,8 @@ static_dir = Path(__file__).parent.parent / "static"
 async def lifespan(_: FastAPI):
     await client.admin.command("ping")
     await initialize_database()
-    await seed_demo_properties()
+    if settings.seed_demo_data:
+        await seed_demo_properties()
     await seed_knowledge_base()
     yield
     await client.close()
@@ -247,6 +257,27 @@ app.add_middleware(
 )
 if static_dir.is_dir():
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "request_failed request_id=%s method=%s path=%s",
+            request_id, request.method, request.url.path,
+        )
+        raise
+    response.headers["x-request-id"] = request_id
+    logger.info(
+        "request_complete request_id=%s method=%s path=%s status=%s duration_ms=%s",
+        request_id, request.method, request.url.path, response.status_code,
+        round((time.monotonic() - started) * 1000),
+    )
+    return response
 
 
 class PropertyIn(BaseModel):
@@ -332,9 +363,48 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    await client.admin.command("ping")
-    return {"status": "ok", "database": settings.mongodb_database,
-            "model": settings.openrouter_model, "whatsapp": is_configured()}
+    return {"status": "ok", "service": "estate-ai-chatbot", "version": "1.0.0"}
+
+
+@app.get("/api/ready")
+async def readiness(response: Response):
+    """Report whether every dependency required for production traffic is usable."""
+    checks: dict[str, dict[str, Any]] = {}
+    try:
+        await client.admin.command("ping")
+        checks["mongodb"] = {"ok": True, "database": settings.mongodb_database}
+    except Exception:
+        checks["mongodb"] = {"ok": False, "error": "database unavailable"}
+
+    paid_model = bool(
+        settings.openrouter_model and settings.openrouter_model != "openrouter/free"
+    )
+    checks["llm"] = {
+        "ok": bool(settings.openrouter_api_key and paid_model),
+        "model": settings.openrouter_model or "not configured",
+        "error": (
+            None if settings.openrouter_api_key and paid_model
+            else "OpenRouter API key is missing" if not settings.openrouter_api_key
+            else "configure a pinned paid production model"
+        ),
+    }
+    checks["wacrm"] = {
+        "ok": wacrm.is_configured() and bool(settings.wacrm_webhook_secret),
+        "api": bool(settings.wacrm_api_url and settings.wacrm_api_key),
+        "signed_webhook": bool(settings.wacrm_webhook_secret),
+    }
+    checks["automation"] = {
+        "ok": bool(settings.cron_secret),
+        "cron_secret": bool(settings.cron_secret),
+    }
+    checks["admin_api"] = {
+        "ok": bool(settings.property_admin_secret),
+        "protected": bool(settings.property_admin_secret),
+    }
+    ready = all(check["ok"] for check in checks.values())
+    if not ready:
+        response.status_code = 503
+    return {"status": "ready" if ready else "not_ready", "checks": checks}
 
 
 @app.post("/api/public-property-enquiry", response_class=HTMLResponse)
@@ -663,6 +733,11 @@ async def list_properties(
 
 @app.websocket("/ws/chat/{session_id}")
 async def chat_socket(ws: WebSocket, session_id: str):
+    origin = ws.headers.get("origin", "")
+    allowed = set(settings.origins)
+    if origin and origin not in allowed:
+        await ws.close(code=1008, reason="Origin not allowed")
+        return
     await ws.accept()
     try:
         while True:

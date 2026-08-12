@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    environment: str = "development"
     openrouter_api_key: str
     openrouter_model: str = "openrouter/free"
     openrouter_embedding_model: str = "openai/text-embedding-3-small"
@@ -32,6 +33,7 @@ class Settings(BaseSettings):
     public_form_template_name: str = "property_enquiry_followup"
     public_form_template_language: str = "en_US"
     property_admin_secret: str = ""
+    seed_demo_data: bool = False
 
     model_config = SettingsConfigDict(
         env_file=(Path(__file__).parent.parent / ".env", Path(__file__).with_name(".env")),
