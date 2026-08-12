@@ -9,10 +9,14 @@ from collections.abc import Awaitable, Callable
 from pymongo.errors import DuplicateKeyError
 from .agent import (
     _is_greeting, advise_on_selected_property, classify_booking_cancellation,
-    classify_property_response, extract_schedule, generate_advisor_reply,
+    classify_property_response, extract_customer_identity, extract_schedule, generate_advisor_reply,
     generate_property_captions, graph,
 )
 from .config import get_settings
+from .customer_memory import (
+    get_customer_profile, latest_booking, remember_booking,
+    remember_cancellation, request_customer_name, save_customer_name,
+)
 from .database import db, save_message
 from .site_visits import (
     alternative_slots, available_salespeople, create_site_visit,
@@ -92,6 +96,75 @@ async def send_image(to: str, url: str, caption: str = "") -> None:
     if caption:
         image["caption"] = caption[:1024]
     await _post({"to": to, "type": "image", "image": image})
+
+
+def _booking_memory_text(name: str, booking: dict[str, Any]) -> str:
+    """Build a factual, customer-ready fallback from persistent booking data."""
+    if not booking:
+        return f"Hello {name} 👋 How can I help with your property search today?"
+    status = str(booking.get("status") or booking.get("appointment_status") or "saved")
+    property_title = booking.get("property_title")
+    schedule = booking.get("scheduled_at") or booking.get("preferred_schedule")
+    booking_type = str(booking.get("booking_type") or "consultation").replace("_", " ")
+    details = booking_type
+    if property_title:
+        details += f" for {property_title}"
+    if isinstance(schedule, datetime):
+        details += f" on {display_slot(schedule)}"
+    elif schedule:
+        details += f" on {schedule}"
+    return (
+        f"Hello {name} 👋 I remember your {details}. Its current status is {status}. "
+        "How can I help you today?"
+    )
+
+
+async def _handle_customer_identity(
+    phone: str,
+    text: str,
+    send: Callable[[str, str], Awaitable[Any]] = send_text,
+) -> bool:
+    """Ask a name once, then greet using permanent customer and booking memory."""
+    profile = (
+        await get_customer_profile(phone, db)
+        if hasattr(db, "customer_profiles") else {}
+    )
+    if profile.get("onboarding_stage") == "awaiting_name":
+        identity = await extract_customer_identity(text)
+        customer_name = str(identity.get("name") or "").strip()
+        if not customer_name:
+            reply = "I’d be happy to help 👋 What name should I use for you?"
+            await send(phone, reply)
+            await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
+            return True
+        await save_customer_name(phone, customer_name, database=db)
+        booking = await latest_booking(phone, db)
+        required = _booking_memory_text(customer_name, booking)
+        reply = await generate_advisor_reply(
+            required, text,
+            {"customer_name": customer_name, "latest_booking": booking},
+        )
+        await send(phone, reply)
+        await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
+        return True
+    if not _is_greeting(text):
+        return False
+    customer_name = str(profile.get("name") or "").strip()
+    if not profile.get("name_confirmed") or not customer_name:
+        await request_customer_name(phone, db)
+        reply = "Hello 👋 May I know your name?"
+        await send(phone, reply)
+        await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
+        return True
+    booking = await latest_booking(phone, db)
+    required = _booking_memory_text(customer_name, booking)
+    reply = await generate_advisor_reply(
+        required, text,
+        {"customer_name": customer_name, "latest_booking": booking},
+    )
+    await send(phone, reply)
+    await save_message(f"wa:{phone}", "assistant", reply, channel="whatsapp")
+    return True
 
 
 async def capture_engaged_lead(
@@ -185,11 +258,13 @@ async def process_message(message: dict[str, Any]) -> None:
 
     try:
         await mark_read_and_typing(message_id)
+        await save_message(f"wa:{sender}", "user", text, channel="whatsapp")
+        if await _handle_customer_identity(sender, text):
+            return
         if await _handle_lead_details(sender, message.get("_customer_name", ""), text, ai_replies=True):
             return
         if await _cancel_saved_booking(sender, text, ai_replies=True):
             return
-        await save_message(f"wa:{sender}", "user", text, channel="whatsapp")
         result = await graph.ainvoke({
             "session_id": f"wa:{sender}",
             "message": text,
@@ -290,6 +365,16 @@ async def _handle_lead_details(
     pending = await db.pending_leads.find_one({"session_id": f"wa:{phone}"})
     if not pending:
         return False
+    profile = (
+        await get_customer_profile(phone, db)
+        if hasattr(db, "customer_profiles") else {}
+    )
+    confirmed_name = (
+        str(profile.get("name") or "").strip()
+        if profile.get("name_confirmed") else ""
+    )
+    if confirmed_name:
+        name = confirmed_name
     if ai_replies:
         raw_send = send
 
@@ -318,6 +403,43 @@ async def _handle_lead_details(
             f"Hi {customer_name}. Your earlier request{subject} is still in progress. "
             "Would you like to continue?",
         )
+        return True
+    if stage == "awaiting_booking_name":
+        identity = await extract_customer_identity(text)
+        customer_name = str(identity.get("name") or "").strip()
+        if not customer_name:
+            await send(phone, "What name should I use for your booking?")
+            return True
+        await save_customer_name(phone, customer_name, database=db)
+        name = customer_name
+        next_stage = str(pending.get("after_name_stage") or "awaiting_booking_email")
+        await db.pending_leads.update_one(
+            {"_id": pending["_id"]},
+            {"$set": {
+                "stage": next_stage,
+                "customer_name": customer_name,
+                "contact_phone": phone,
+            }},
+        )
+        if next_stage == "awaiting_site_visit_schedule":
+            await send(
+                phone,
+                f"Hello {customer_name} 👋 What date and time would you like to visit the property?",
+            )
+        else:
+            await send(phone, f"Hello {customer_name} 👋 What email should I use for the confirmation?")
+        return True
+    inline_parts = [part.strip() for part in text.split("|")]
+    has_inline_name = (
+        len(inline_parts) > 1 and bool(inline_parts[0])
+        and "@" not in inline_parts[0]
+        and not any(character.isdigit() for character in inline_parts[0])
+    )
+    if stage == "awaiting_details" and not confirmed_name and not has_inline_name:
+        await db.pending_leads.update_one(
+            {"_id": pending["_id"]}, {"$set": {"stage": "awaiting_booking_name"}}
+        )
+        await send(phone, "Before I arrange it, what name should I use for your booking?")
         return True
     if stage in {"awaiting_details", "awaiting_booking_email"}:
         email = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
@@ -450,6 +572,13 @@ async def _handle_lead_details(
             }, "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
+        if hasattr(db, "booking_history"):
+            await remember_booking(
+                phone=phone, booking_type="site_visit", status="scheduled",
+                property_title=pending.get("selected_property") or "Selected property",
+                scheduled_at=slot, source_id=str(visit.get("id") or ""),
+                database=db,
+            )
         await stop_sales_followups(phone)
         await db.pending_leads.delete_one({"_id": pending["_id"]})
         await send(
@@ -497,6 +626,13 @@ async def _handle_lead_details(
                 }, "$setOnInsert": {"created_at": now}, "$inc": {"enquiry_count": 1}},
                 upsert=True,
             )
+            if hasattr(db, "booking_history"):
+                await remember_booking(
+                    phone=phone, booking_type="consultation", status="requested",
+                    property_title=pending.get("selected_property"),
+                    scheduled_at=schedule, contact_preference=preference,
+                    database=db,
+                )
             await db.pending_leads.delete_one({"_id": pending["_id"]})
             await stop_sales_followups(phone)
             method = "video call" if preference == "video_call" else "phone call"
@@ -532,6 +668,14 @@ async def _handle_lead_details(
             }, "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
+        if hasattr(db, "booking_history"):
+            await remember_booking(
+                phone=phone, booking_type="consultation", status="requested",
+                property_title=pending.get("selected_property"),
+                scheduled_at=pending.get("preferred_schedule"),
+                contact_preference=pending.get("contact_preference") or "phone_call",
+                database=db,
+            )
         await stop_sales_followups(phone)
         await db.pending_leads.delete_one({"_id": pending["_id"]})
         saved_schedule = pending.get("preferred_schedule")
@@ -641,6 +785,20 @@ async def _handle_lead_details(
                 r"\b(site\s*visit|property\s*visit|visit\s*(?:the\s*)?(?:site|property|home|flat)|see\s*(?:the\s*)?(?:property|flat|home)|physical\s*visit)\b",
                 lowered,
             ))
+            if not confirmed_name:
+                await db.pending_leads.update_one(
+                    {"_id": pending["_id"]},
+                    {"$set": {
+                        "stage": "awaiting_booking_name",
+                        "after_name_stage": (
+                            "awaiting_site_visit_schedule" if wants_site_visit
+                            else "awaiting_booking_email"
+                        ),
+                        "booking_type": "site_visit" if wants_site_visit else "consultation",
+                    }},
+                )
+                await send(phone, "Great—before I arrange it, what name should I use for your booking?")
+                return True
             if wants_site_visit:
                 await db.pending_leads.update_one(
                     {"_id": pending["_id"]},
@@ -665,8 +823,8 @@ async def _handle_lead_details(
                 await send(phone, "Sure. What date and time would you like to visit the property?")
                 return True
             booking_changes: dict[str, Any] = {
-                "stage": "awaiting_booking_email",
-                "customer_name": name or pending.get("whatsapp_name") or phone,
+                "stage": "awaiting_booking_email" if confirmed_name else "awaiting_booking_name",
+                "customer_name": confirmed_name or None,
                 "contact_phone": phone,
             }
             if preference:
@@ -674,7 +832,13 @@ async def _handle_lead_details(
             await db.pending_leads.update_one(
                 {"_id": pending["_id"]}, {"$set": booking_changes}
             )
-            await send(phone, "Great—I can arrange that. What email should I use for the confirmation?")
+            if confirmed_name:
+                await send(
+                    phone,
+                    f"Great, {confirmed_name}—I can arrange that. What email should I use for the confirmation?",
+                )
+            else:
+                await send(phone, "Great—I can arrange that. What name should I use for your booking?")
             return True
         if decision["action"] == "cancel":
             await db.pending_leads.update_one(
@@ -753,6 +917,8 @@ async def _cancel_saved_booking(
             "cancellation_reason": text, "updated_at": now,
         }},
     )
+    if hasattr(db, "booking_history"):
+        await remember_cancellation(phone, text, db)
     property_title = booking.get("property_title") or "your selected property"
     confirmation = (
         f"Your consultation request for {property_title} has been cancelled. "

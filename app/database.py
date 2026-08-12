@@ -20,6 +20,10 @@ async def initialize_database() -> None:
     await db.webhook_events.create_index("created_at", expireAfterSeconds=60 * 60 * 24 * 7)
     await db.leads.create_index([("phone", ASCENDING), ("property_title", ASCENDING)])
     await db.leads.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
+    await db.customer_profiles.create_index("phone", unique=True)
+    await db.booking_history.create_index(
+        [("phone", ASCENDING), ("created_at", DESCENDING)]
+    )
     await db.crm_users.create_index([("role", ASCENDING), ("active", ASCENDING)])
     await db.site_visits.create_index([("scheduled_at", ASCENDING), ("status", ASCENDING)])
     await db.site_visits.create_index([("owner_id", ASCENDING), ("scheduled_at", ASCENDING)])

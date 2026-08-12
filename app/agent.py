@@ -168,6 +168,46 @@ Return ONLY JSON: {"action":"...","reason":"short reason"}. Do not write a reply
         return {"action": "unknown", "reason": "model unavailable"}
 
 
+async def extract_customer_identity(text: str) -> dict[str, str | None]:
+    """Extract a person's stated name through the model and preserve extra intent."""
+    prompt = """Extract the customer's own name from their WhatsApp message.
+Understand English, Hindi, Hinglish, misspellings and phrases such as "I am Devesh",
+"mera naam Govind hai", or a name sent alone. Never treat a city, property, greeting,
+email, phone number or request as a person's name.
+Return ONLY JSON: {"name":string|null,"remaining_message":string}.
+remaining_message contains any request besides the name, otherwise an empty string."""
+    try:
+        result = await _create_completion(
+            model=settings.openrouter_model,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+            max_tokens=80,
+        )
+        data = _json_object(result.choices[0].message.content or "{}")
+        name = str(data.get("name") or "").strip(" .,|")
+        if (
+            not name or len(name) > 60 or len(name.split()) > 5
+            or "@" in name or any(character.isdigit() for character in name)
+        ):
+            name = ""
+        return {
+            "name": name or None,
+            "remaining_message": str(data.get("remaining_message") or "").strip(),
+        }
+    except Exception:
+        candidate = re.sub(
+            r"(?i)^\s*(?:my name is|i am|i'm|im|mera naam)\s+", "", text
+        ).strip(" .,|")
+        valid = (
+            1 <= len(candidate.split()) <= 5 and len(candidate) <= 60
+            and "@" not in candidate and not any(char.isdigit() for char in candidate)
+        )
+        return {"name": candidate if valid else None, "remaining_message": ""}
+
+
 async def generate_property_captions(
     cards: list[dict[str, str]], customer_message: str,
 ) -> list[str]:

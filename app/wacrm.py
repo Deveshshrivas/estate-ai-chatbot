@@ -20,7 +20,7 @@ from .agent import (
 from .config import get_settings
 from .database import db, save_message
 from .whatsapp import (
-    _cancel_saved_booking, _format_price, _handle_lead_details,
+    _cancel_saved_booking, _format_price, _handle_customer_identity, _handle_lead_details,
     capture_engaged_lead, delivery_image_url, mark_read_and_typing,
 )
 
@@ -613,6 +613,10 @@ async def _process_current_turn(
             }},
         )
     await mark_read(message_id)
+    session_id = f"wa:{phone}"
+    await save_message(session_id, "user", text, channel="whatsapp")
+    if await _handle_customer_identity(phone, text, send=send_current_text):
+        return
     if _is_goodbye(text):
         await db.pending_leads.delete_many({"session_id": f"wa:{phone}"})
         if await _is_current_turn(phone, message_id):
@@ -690,8 +694,6 @@ async def _process_current_turn(
             phone, str(data.get("contact_id") or ""), data.get("conversation_id")
         )
         return
-    session_id = f"wa:{phone}"
-    await save_message(session_id, "user", text, channel="whatsapp")
     result = await graph.ainvoke({"session_id": session_id, "message": text, "image": None})
     # A newer customer message arrived while the model was thinking. Never send
     # this stale turn's text or property gallery.

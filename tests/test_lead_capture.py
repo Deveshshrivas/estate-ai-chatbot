@@ -6,6 +6,54 @@ from app import whatsapp
 
 
 class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_first_greeting_asks_for_name_once(self):
+        send = AsyncMock()
+        with patch.object(
+            whatsapp, "get_customer_profile", AsyncMock(return_value={})
+        ), patch.object(
+            whatsapp, "request_customer_name", AsyncMock()
+        ) as request_name, patch.object(
+            whatsapp, "save_message", AsyncMock()
+        ):
+            handled = await whatsapp._handle_customer_identity(
+                "919999999999", "hii", send=send
+            )
+        self.assertTrue(handled)
+        request_name.assert_awaited_once()
+        self.assertIn("name", send.await_args.args[1].lower())
+
+    async def test_name_reply_greets_customer_and_recalls_booking(self):
+        send = AsyncMock()
+        booking = {
+            "booking_type": "site_visit", "property_title": "Aster 173",
+            "status": "scheduled", "scheduled_at": "16 Aug at 11 AM",
+        }
+        with patch.object(
+            whatsapp, "get_customer_profile",
+            AsyncMock(return_value={"onboarding_stage": "awaiting_name"}),
+        ), patch.object(
+            whatsapp, "extract_customer_identity",
+            AsyncMock(return_value={"name": "Devesh", "remaining_message": ""}),
+        ), patch.object(
+            whatsapp, "save_customer_name", AsyncMock()
+        ) as save_name, patch.object(
+            whatsapp, "latest_booking", AsyncMock(return_value=booking)
+        ), patch.object(
+            whatsapp, "generate_advisor_reply",
+            AsyncMock(side_effect=lambda required, *_args, **_kwargs: required),
+        ), patch.object(
+            whatsapp, "save_message", AsyncMock()
+        ):
+            handled = await whatsapp._handle_customer_identity(
+                "919999999999", "My name is Devesh", send=send
+            )
+        self.assertTrue(handled)
+        save_name.assert_awaited_once()
+        reply = send.await_args.args[1]
+        self.assertIn("Hello Devesh", reply)
+        self.assertIn("Aster 173", reply)
+        self.assertIn("scheduled", reply)
+
     async def test_booking_stops_campaign_and_form_followups(self):
         campaigns = SimpleNamespace(update_many=AsyncMock())
         forms = SimpleNamespace(update_many=AsyncMock())
