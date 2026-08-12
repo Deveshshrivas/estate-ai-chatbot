@@ -254,6 +254,35 @@ class EarlyLeadCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lead_update["appointment_status"], "not_booked")
         self.assertEqual(lead_update["property_title"], "Ivy Sarjapur Road 104")
 
+    async def test_city_correction_refreshes_inventory_instead_of_reusing_old_choices(self):
+        pending = {
+            "_id": "pending-1",
+            "session_id": "wa:918815096521",
+            "stage": "awaiting_property",
+            "matched_properties": [
+                "Opal Sarjapur Road 118", "Willow Kharadi 135", "Opal Hinjawadi 178",
+            ],
+            "preferences": {"cities": ["Bengaluru", "Pune"]},
+        }
+        pending_leads = SimpleNamespace(find_one=AsyncMock(return_value=pending))
+        classify = AsyncMock()
+        with patch.object(
+            whatsapp, "db", SimpleNamespace(pending_leads=pending_leads)
+        ), patch.object(whatsapp, "classify_property_response", classify):
+            handled = await whatsapp._handle_lead_details(
+                "918815096521", "Devesh",
+                "i am interested only in Bengaluru not pune for now",
+                send=AsyncMock(),
+            )
+        self.assertFalse(handled)
+        classify.assert_not_awaited()
+
+    def test_named_property_is_not_mistaken_for_filter_update(self):
+        self.assertFalse(whatsapp._is_search_preference_update(
+            "Opal Sarjapur Road 118 in Bengaluru looks good",
+            ["Opal Sarjapur Road 118", "Willow Kharadi 135"],
+        ))
+
     async def test_ambiguous_booking_asks_site_visit_or_appointment(self):
         pending = {
             "_id": "pending-1", "session_id": "wa:918815096521",

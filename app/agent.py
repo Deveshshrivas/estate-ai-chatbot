@@ -872,7 +872,7 @@ def _explicitly_excluded_cities(text: str) -> list[str]:
         patterns = (
             rf"\b(?:do not|don't|dont|not|exclude|except|remove)\b[^,.!?]{{0,24}}\b{re.escape(alias)}\b",
             rf"\b(?:no|not)\s+{re.escape(alias)}\b",
-            rf"\b{re.escape(alias)}\b.{{0,18}}\b(?:not|nahi|mat)\b",
+            rf"\b{re.escape(alias)}\b\s+(?:is\s+)?(?:nahi|mat|not\s+(?:wanted|preferred|required|needed|for\s+now|interested))\b",
         )
         if any(re.search(pattern, lowered) for pattern in patterns) and canonical not in excluded:
             excluded.append(canonical)

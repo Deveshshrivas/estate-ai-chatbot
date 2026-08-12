@@ -8,7 +8,7 @@ import httpx
 from collections.abc import Awaitable, Callable
 from pymongo.errors import DuplicateKeyError
 from .agent import (
-    _is_greeting, advise_on_selected_property, classify_booking_cancellation,
+    _heuristic_intent, _is_greeting, advise_on_selected_property, classify_booking_cancellation,
     classify_booking_type, classify_property_response, extract_customer_identity,
     extract_schedule, finalize_agent_answer, generate_advisor_reply,
     might_cancel_booking, graph,
@@ -25,6 +25,27 @@ from .site_visits import (
 )
 
 settings = get_settings()
+
+
+def _is_search_preference_update(text: str, property_titles: list[str]) -> bool:
+    """Let a new city/filter request refresh inventory instead of selecting an old card."""
+    lowered = text.casefold()
+    names_a_listing = any(title.casefold() in lowered for title in property_titles)
+    selects_number = bool(re.search(
+        r"\b(?:property|option|number|no\.?|#)\s*[1-9]\b|"
+        r"\b(?:first|second|third|fourth|fifth|sixth|1st|2nd|3rd|4th|5th|6th)\s+(?:one|property|option)\b",
+        lowered,
+    ))
+    if names_a_listing or selects_number:
+        return False
+    intent = _heuristic_intent(text)
+    filter_keys = {
+        "city", "cities", "locality", "property_type", "purpose",
+        "min_price", "max_price", "min_bedrooms", "max_bedrooms",
+        "min_bathrooms", "min_area_sqft", "max_area_sqft", "furnishing",
+        "possession_status", "facing", "min_parking", "amenities",
+    }
+    return any(intent.get(key) not in (None, "", []) for key in filter_keys)
 
 
 def delivery_image_url(url: str) -> str:
@@ -762,6 +783,8 @@ async def _handle_lead_details(
         )
         return True
     if stage in {"showing_results", "awaiting_property"}:
+        if _is_search_preference_update(text, properties):
+            return False
         try:
             decision = await classify_property_response(text, properties)
         except Exception:

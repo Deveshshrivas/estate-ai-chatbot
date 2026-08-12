@@ -536,6 +536,32 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Mumbai", result["intent"].get("cities", []))
         self.assertEqual(result["intent"]["excluded_cities"], ["Mumbai"])
 
+    async def test_exact_bengaluru_only_correction_survives_model_rate_limit(self):
+        with patch.object(
+            agent, "_create_completion", AsyncMock(side_effect=RuntimeError("rate limited"))
+        ):
+            understood = await agent.understand({
+                "session_id": "bengaluru-only",
+                "message": "i am interested only in Bengaluru not pune for now",
+                "history": [
+                    {"role": "user", "content": "show Bengaluru and Pune properties"},
+                    {"role": "assistant", "content": "Here are matching properties"},
+                ],
+            })
+        self.assertEqual(understood["intent"].get("city"), "Bengaluru")
+        self.assertNotIn("Pune", understood["intent"].get("cities", []))
+
+        sessions = FakeSearchSessions()
+        with patch.object(agent, "properties", FakeProperties()), patch.object(
+            agent, "db", SimpleNamespace(search_sessions=sessions)
+        ):
+            result = await agent.search_inventory({
+                "session_id": "bengaluru-only",
+                "intent": understood["intent"],
+            })
+        self.assertEqual(len(result["matches"]), 5)
+        self.assertTrue(all(row["city"] == "Bengaluru" for row in result["matches"]))
+
     async def test_partial_unique_property_name_is_resolved(self):
         completion = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=(
